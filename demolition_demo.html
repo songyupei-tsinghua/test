@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>3D Building Demolition Demo</title>
+  <style>
+    body { margin: 0; overflow: hidden; background:#111; font-family:Arial}
+    #ui {
+      position: absolute; top: 10px; left: 10px; z-index: 1;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    button {
+      padding: 8px 12px; font-size: 14px; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <button id="explodeBtn">Explode</button>
+    <button id="resetBtn">Reset</button>
+    <button id="camBtn">Switch Camera</button>
+  </div>
+  <script type="module">
+    // Import Three.js and cannon-es
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.module.js';
+    import * as CANNON from 'https://cdn.jsdelivr.net/npm/cannon-es@0.18.0/dist/cannon-es.js';
+
+    // ---------- Core Variables ----------
+    let scene, camera, renderer, world;
+    let groundBody;
+    const blockMeshes = [];
+    const blockBodies = [];
+    const smokeParticles = [];
+    const dustParticles = [];
+    let clock;
+    let explosionPoint;
+    let camMode = 0; // 0 = orbit, 1 = third person
+
+    // ---------- Init ----------
+    init();
+    animate();
+
+    function init() {
+      // Scene
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111111);
+
+      // Camera
+      camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        2000
+      );
+      camera.position.set(0, 50, 150);
+      camera.lookAt(0, 30, 0);
+
+      // Renderer
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      // Lights
+      const ambient = new THREE.AmbientLight(0x404040, 2);
+      scene.add(ambient);
+      const dirLight = new THREE.DirectionalLight(0xffffff, 2);
+      dirLight.position.set(50, 200, 50);
+      scene.add(dirLight);
+
+      // Physics world
+      world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
+      world.defaultContactMaterial.friction = 0.9;
+      world.defaultContactMaterial.restitution = 0.05;
+      world.broadphase = new CANNON.SAPBroadphase(world);
+
+      // Ground
+      const groundGeo = new THREE.PlaneGeometry(80, 80, 1, 1);
+      const groundMat = new THREE.MeshStandardMaterial({ color: 0x444444 });
+      const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+      groundMesh.rotation.x = -Math.PI / 2;
+      groundMesh.receiveShadow = true;
+      scene.add(groundMesh);
+      const groundShape = new CANNON.Plane();
+      groundBody = new CANNON.Body({ mass: 0, shape: groundShape });
+      groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+      world.addBody(groundBody);
+
+      // Explosion point (invisible)
+      explosionPoint = new CANNON.Body({ mass: 0 });
+      explosionPoint.position.set(0, 0.5, 0);
+      world.addBody(explosionPoint);
+
+      // Build tower
+      buildTower();
+
+      // Controls
+      initControls();
+      initUI();
+
+      // Stabilize tower (let it sleep)
+      for (const body of blockBodies) {
+        body.sleep();
+      }
+    }
+
+    // ---------- Build tower ----------
+    function buildTower() {
+      const blockSize = 1;
+      const radius = 3.2; // approximate radius to accommodate 20 blocks per ring
+      const layers = 60;
+      const blocksPerLayer = 20;
+      const offsetAngle = Math.PI / blocksPerLayer; // 18 degrees
+
+      for (let y = 0; y < layers; y++) {
+        const isOffset = y % 2 === 1; // 50% offset alternating layers
+        const angleOffset = isOffset ? offsetAngle / 2 : 0;
+        for (let i = 0; i < blocksPerLayer; i++) {
+          const angle = i * offsetAngle + angleOffset;
+          const x = radius * Math.cos(angle);
+          const z = radius * Math.sin(angle);
+          const pos = new CANNON.Vec3(x, y + 0.5, z); // 0.5 so block sits on top
+          const shape = new CANNON.Box(new CANNON.Vec3(blockSize / 2, blockSize / 2, blockSize / 2));
+          const body = new CANNON.Body({ mass: 1, shape });
+          body.position.copy(pos);
+          body.allowSleep = true;
+          body.sleep();
+          world.addBody(body);
+          blockBodies.push(body);
+          // Create Three.js mesh
+          const matColor = y === 0 ? 0xeeeedd : 0xddddcc; // top layer visible as bricks
+          const mat = new THREE.MeshStandardMaterial({ color: matColor });
+          const mesh = new THREE.Mesh(new THREE.BoxGeometry(blockSize, blockSize, blockSize), mat);
+          mesh.position.set(x, y + 0.5, z);
+          scene.add(mesh);
+          blockMeshes.push(mesh);
+        }
+      }
+      // Mark the rightmost block of first layer as explosion point
+      const rightmost = blockBodies[0];
+      explosionPoint.position.copy(rightmost.position);
+      // Slightly offset explosion point inside the block
+      explosionPoint.position.x += 0.5;
+    }
+
+    // ---------- UI ----------
+    function initUI() {
+      const explodeBtn = document.getElementById('explodeBtn');
+      explodeBtn.addEventListener('click', explode);
+      const resetBtn = document.getElementById('resetBtn');
+      resetBtn.addEventListener('click', resetScene);
+      const camBtn = document.getElementById('camBtn');
+      camBtn.addEventListener('click', toggleCamera);
+    }
+
+    function resetScene() {
+      // Remove all blocks
+      blockMeshes.forEach(m => scene.remove(m));
+      blockBodies.forEach(b => world.removeBody(b));
+      blockMeshes.length = 0;
+      blockBodies.length = 0;
+      buildTower();
+      for (const body of blockBodies) body.sleep();
+    }
+
+    function toggleCamera() {
+      camMode = (camMode + 1) % 2;
+      if (camMode === 0) {
+        camera.position.set(0, 50, 150);
+      } else {
+        camera.position.set(100, 100, 100);
+        camera.lookAt(0, 30, 0);
+      }
+    }
+
+    // ---------- Explosion ----------
+    function explode() {
+      // Wake bodies in radius 2 of explosion point
+      for (const body of blockBodies) {
+        const dist = body.position.distanceTo(explosionPoint.position);
+        if (dist <= 2) {
+          body.wakeUp();
+          const forceMag = 2 + Math.random() * 3; // 2-5
+          const dir = body.position.vsub(explosionPoint.position).normalize();
+          body.applyImpulse(dir.scale(forceMag), body.position);
+        }
+      }
+    }
+
+    // ---------- Controls ----------
+    function initControls() {
+      let isLeftDown = false;
+      let isRightDown = false;
+      let prevX = 0, prevY = 0;
+      renderer.domElement.addEventListener('mousedown', e => {
+        if (e.button === 0) isLeftDown = true;
+        if (e.button === 2) isRightDown = true;
+      });
+      renderer.domElement.addEventListener('mouseup', e => {
+        if (e.button === 0) isLeftDown = false;
+        if (e.button === 2) isRightDown = false;
+      });
+      renderer.domElement.addEventListener('mousemove', e => {
+        const deltaX = e.clientX - prevX;
+        const deltaY = e.clientY - prevY;
+        if (isLeftDown) {
+          camera.rotation.y -= deltaX * 0.005;
+          camera.rotation.x -= deltaY * 0.005;
+        }
+        if (isRightDown) {
+          camera.position.x += deltaX * 0.1;
+          camera.position.z += deltaY * 0.1;
+        }
+        prevX = e.clientX;
+        prevY = e.clientY;
+      });
+      renderer.domElement.addEventListener('wheel', e => {
+        camera.fov += e.deltaY * 0.05;
+        camera.fov = THREE.MathUtils.clamp(camera.fov, 30, 100);
+        camera.updateProjectionMatrix();
+      });
+    }
+
+    // ---------- Animation Loop ----------
+    function animate() {
+      requestAnimationFrame(animate);
+      world.step(1 / 60);
+      // Update block positions
+      for (let i = 0; i < blockMeshes.length; i++) {
+        blockMeshes[i].position.copy(blockBodies[i].position);
+        blockMeshes[i].quaternion.copy(blockBodies[i].quaternion);
+      }
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
